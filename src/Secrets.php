@@ -4,19 +4,31 @@ namespace Bref\Secrets;
 
 use AsyncAws\Ssm\SsmClient;
 use Closure;
+use Dotenv\Dotenv;
 use JsonException;
 use RuntimeException;
 
 class Secrets
 {
     /**
+     * Directory where stage-specific env files are looked up.
+     * Override in tests to point at a temp directory.
+     * @internal
+     */
+    public static string $dotEnvDirectory = '/opt/secrets';
+    /**
      * Decrypt environment variables that are encrypted with AWS SSM.
+     * Also loads the stage-specific env file from the Lambda layer path
+     * /opt/secrets/env.{stage} before resolving SSM values, so that
+     * `bref-ssm:` references inside the file are also resolved.
      *
      * @param SsmClient|null $ssmClient To allow mocking in tests.
      * @throws JsonException
      */
     public static function loadSecretEnvironmentVariables(?SsmClient $ssmClient = null): void
     {
+        self::loadDotEnv();
+
         /** @var array<string,string>|string|false $envVars */
         $envVars = getenv(local_only: true);
         if (! is_array($envVars)) {
@@ -55,6 +67,25 @@ class Secrets
             $stderr = fopen('php://stderr', 'ab');
             fwrite($stderr, '[Bref] Loaded these environment variables from SSM: ' . implode(', ', array_keys($envVarsToDecrypt)) . PHP_EOL);
         }
+    }
+
+    /**
+     * Load the stage-specific env file from the Lambda layer path into the process environment.
+     *
+     * Uses createUnsafeImmutable so that putenv() is called AND existing variables
+     * (real Lambda env vars, SSM values already set) are never overwritten.
+     */
+    private static function loadDotEnv(): void
+    {
+        $stage     = getenv('STAGE') ?: getenv('APP_ENV') ?: 'production';
+        $directory = self::$dotEnvDirectory;
+        $filename  = "env.{$stage}";
+
+        if (! is_file("{$directory}/{$filename}") || ! is_readable("{$directory}/{$filename}")) {
+            return;
+        }
+
+        Dotenv::createUnsafeImmutable($directory, $filename)->load();
     }
 
     /**
